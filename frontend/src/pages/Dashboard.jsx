@@ -446,6 +446,13 @@ const Dashboard = () => {
     }
   };
 
+  const handleQRPaymentInitiate = (amount) => {
+    setPaymentAmount(amount.toString());
+    setTimeout(() => {
+      handleStripeCheckout();
+    }, 100);
+  };
+
   const clearPaymentStatus = () => {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete("payment");
@@ -883,6 +890,7 @@ const Dashboard = () => {
         setNewTransaction={setNewTransaction}
         handleAddTransaction={handleAddTransaction}
         loading={loading}
+        onPaymentInitiate={handleQRPaymentInitiate}
       />
     </div>
   );

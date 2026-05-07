@@ -14,6 +14,7 @@ import axios from "axios";
 import Income from "./pages/Income";
 import Expense from "./pages/Expense";
 import Profile from "./pages/Profile";
+import Payment from "./pages/Payment";
 import { API_URL } from "./config/api";
 
 // to get transaction from localstorage
@@ -256,6 +257,11 @@ const App = () => {
                 refreshTransactions={refreshTransactions}
               />
             }
+          />
+
+          <Route
+            path="/payment"
+            element={<Payment addTransaction={addTransaction} />}
           />
 
           <Route

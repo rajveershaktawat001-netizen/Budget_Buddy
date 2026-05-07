@@ -1,6 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { modalStyles } from "../assets/dummyStyles";
 import { X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import QrScanner from "qr-scanner";
+import qrScannerWorkerSource from "qr-scanner/qr-scanner-worker.min.js?url";
+QrScanner.WORKER_PATH = qrScannerWorkerSource;
 
 const parseQrData = (rawValue, fallbackCategory) => {
   const nextState = {};
@@ -64,14 +68,19 @@ const AddTransactionModal = ({
     "Other",
   ],
   color = "teal",
+  onPaymentInitiate = null,
 }) => {
   const [scanMessage, setScanMessage] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
+  const [showPaymentOption, setShowPaymentOption] = useState(false);
+  const navigate = useNavigate();
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const detectorRef = useRef(null);
+  const qrScannerRef = useRef(null);
+  const fileInputRef = useRef(null);
   const scanFrameRef = useRef(null);
+  const scanTimeoutRef = useRef(null);
 
   // Get current date in YYYY-MM-DD format
   const today = new Date();
@@ -82,9 +91,19 @@ const AddTransactionModal = ({
   const colorClass = modalStyles.colorClasses[color];
 
   const stopCamera = () => {
+    if (scanTimeoutRef.current) {
+      clearTimeout(scanTimeoutRef.current);
+      scanTimeoutRef.current = null;
+    }
+
     if (scanFrameRef.current) {
       cancelAnimationFrame(scanFrameRef.current);
       scanFrameRef.current = null;
+    }
+
+    if (qrScannerRef.current) {
+      qrScannerRef.current.destroy();
+      qrScannerRef.current = null;
     }
 
     if (streamRef.current) {
@@ -106,42 +125,59 @@ const AddTransactionModal = ({
     };
   }, []);
 
-  const scanVideoFrame = async () => {
-    if (!videoRef.current || !detectorRef.current || !cameraActive) {
-      return;
-    }
+  const handleImageScan = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setScanMessage("Scanning image...");
+    setIsScanning(true);
 
     try {
-      const codes = await detectorRef.current.detect(videoRef.current);
-      if (codes.length && codes[0].rawValue) {
-        const parsed = parseQrData(codes[0].rawValue, newTransaction.category);
-        setNewTransaction((prev) => ({
-          ...prev,
-          ...parsed,
-        }));
-        setScanMessage("QR scanned. Transaction fields were updated.");
-        stopCamera();
-        return;
+      const result = await QrScanner.scanImage(file);
+      const parsed = parseQrData(result, newTransaction.category);
+      setNewTransaction((prev) => ({
+        ...prev,
+        ...parsed,
+      }));
+      setScanMessage("QR scanned from image. Transaction fields were updated.");
+      
+      // Show payment option if amount is detected and payment handler exists
+      if (parsed.amount && onPaymentInitiate) {
+        setShowPaymentOption(true);
+        setScanMessage("QR scanned! You can pay now or save as transaction.");
       }
     } catch (error) {
-      console.error("QR scan failed:", error);
-      setScanMessage("Could not scan the live camera feed.");
-      stopCamera();
-      return;
+      console.error("Image scan failed:", error);
+      setScanMessage("Could not scan QR code from image. Try taking a clearer photo.");
+    } finally {
+      setIsScanning(false);
+      // Reset the input
+      if (event.target) event.target.value = '';
     }
+  };
 
-    scanFrameRef.current = requestAnimationFrame(scanVideoFrame);
+  const openCameraCapture = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+
+  const handlePaymentInitiate = () => {
+    if (onPaymentInitiate && newTransaction.amount) {
+      onPaymentInitiate(parseFloat(newTransaction.amount));
+      setShowModal(false);
+      setShowPaymentOption(false);
+      setNewTransaction({
+        description: "",
+        amount: "",
+        category: categories[0],
+        type: type === "both" ? "expense" : type,
+        date: currentDate,
+      });
+    }
   };
 
   const startCameraScan = async () => {
-    if (
-      typeof window === "undefined" ||
-      typeof window.BarcodeDetector === "undefined"
-    ) {
-      setScanMessage("QR scanning is not supported in this browser.");
-      return;
-    }
-
     if (
       typeof navigator === "undefined" ||
       !navigator.mediaDevices ||
@@ -151,39 +187,80 @@ const AddTransactionModal = ({
       return;
     }
 
-    try {
-      setScanMessage("");
-      setIsScanning(true);
-
-      detectorRef.current = new window.BarcodeDetector({
-        formats: ["qr_code"],
-      });
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      setCameraActive(true);
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      scanFrameRef.current = requestAnimationFrame(scanVideoFrame);
-    } catch (error) {
-      console.error("Camera start failed:", error);
-      setScanMessage("Could not access the camera.");
-      stopCamera();
+    if (!(await QrScanner.hasCamera())) {
+      setScanMessage("No camera found.");
+      return;
     }
+
+    setScanMessage("");
+    setIsScanning(true);
+    setCameraActive(true);
+
+    // Redirect to payment details after 5 seconds
+    scanTimeoutRef.current = setTimeout(() => {
+      stopCamera();
+      setShowModal(false);
+      navigate("/payment");
+    }, 5000);
+
+    // Delay to ensure video element is visible
+    setTimeout(() => {
+      try {
+        const handleSuccess = (result) => {
+          console.log("QR Code detected:", result);
+          const qrValue = typeof result === 'string' ? result : (result.data || result);
+          const parsed = parseQrData(qrValue, newTransaction.category);
+          setNewTransaction((prev) => ({
+            ...prev,
+            ...parsed,
+          }));
+          setScanMessage("✅ QR scanned. Transaction fields were updated.");
+          
+          // Show payment option if amount is detected and payment handler exists
+          if (parsed.amount && onPaymentInitiate) {
+            setShowPaymentOption(true);
+            setScanMessage("✅ QR scanned! You can pay now or save as transaction.");
+          }
+          
+          stopCamera();
+        };
+
+        qrScannerRef.current = new QrScanner(
+          videoRef.current,
+          handleSuccess,
+          {
+            onDecodeError: (error) => {
+              console.log("Scanning...");
+            },
+            highlightScanRegion: true,
+            highlightCodeOutline: true,
+            maxScansPerSecond: 5,
+          }
+        );
+
+        qrScannerRef.current.start()
+          .then(() => {
+            console.log("QR Scanner started successfully");
+            setScanMessage("📸 Scanning... Point your camera at a QR code");
+          })
+          .catch((error) => {
+            console.error("Camera start failed:", error);
+            setScanMessage(`❌ Camera error: ${error.message || 'Could not access camera'}`);
+            stopCamera();
+          });
+      } catch (error) {
+        console.error("QR Scanner setup failed:", error);
+        setScanMessage(`❌ Setup failed: ${error.message}`);
+        stopCamera();
+      }
+    }, 300);
   };
 
   useEffect(() => {
     if (!showModal) {
       stopCamera();
       setScanMessage("");
+      setShowPaymentOption(false);
     }
   }, [showModal]);
 
@@ -225,18 +302,39 @@ const AddTransactionModal = ({
                 >
                   {cameraActive ? "Stop Camera" : "Start Live Scanner"}
                 </button>
-                {cameraActive && (
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="h-56 w-full rounded-lg border border-gray-200 object-cover"
-                  />
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleImageScan}
+                  ref={fileInputRef}
+                  style={{ display: 'none' }}
+                />
+                {!cameraActive && (
+                  <button
+                    type="button"
+                    onClick={openCameraCapture}
+                    className={modalStyles.submitButton(colorClass.button)}
+                  >
+                    📸 Scan from Camera App
+                  </button>
                 )}
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    display: cameraActive ? 'block' : 'none',
+                    width: '100%',
+                    height: '14rem',
+                    objectFit: 'cover',
+                  }}
+                  className="rounded-lg border border-gray-200"
+                />
               </div>
               <p className="mt-2 text-xs text-gray-500">
-                Scan a QR code live to auto-fill amount and description.
+                Scan a QR code live to auto-fill amount and description, or wait 5 seconds to proceed to payment manually.
               </p>
               {scanMessage && (
                 <p className="mt-2 text-xs text-teal-600">{scanMessage}</p>
@@ -361,6 +459,25 @@ const AddTransactionModal = ({
             >
               {isScanning ? "Scanning..." : buttonText}
             </button>
+
+            {showPaymentOption && newTransaction.amount && onPaymentInitiate && (
+              <div className="mt-3 flex gap-2 border-t border-gray-200 pt-3">
+                <button
+                  type="button"
+                  onClick={handlePaymentInitiate}
+                  className="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
+                >
+                  💳 Pay ${parseFloat(newTransaction.amount).toFixed(2)}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPaymentOption(false)}
+                  className="flex-1 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+                >
+                  Save Only
+                </button>
+              </div>
+            )}
           </div>
         </form>
       </div>
